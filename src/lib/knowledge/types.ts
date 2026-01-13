@@ -55,14 +55,30 @@ export interface FixedCharge {
 
 export interface ElectricityPricingStructure {
   energyCharges: {
-    bands: EnergyBand[];
+    // Residential: banded pricing
+    bands?: EnergyBand[];
     billingPeriodDays?: number;
+    // Commercial: flat rate per kWh (in cents × 100, e.g., 391900 = R3.9190)
+    flatRate?: number;
+    // Industrial TOU: seasonal rates
+    summer?: { peak: number; standard: number; offPeak: number };
+    winter?: { peak: number; standard: number; offPeak: number };
   };
   fixedCharges: FixedCharge[];
   demandCharges?: {
-    ratePerKva: number;
+    ratePerKva?: number;
+    notifiedDemand?: number;
+    actualDemand?: number;
     threshold?: number;
   } | null;
+  // Industrial: network charges
+  networkCharges?: {
+    summerAccess?: number;
+    summerDemand?: number;
+    winterAccess?: number;
+    winterDemand?: number;
+  };
+  timeOfUse?: boolean;
 }
 
 export interface WaterPricingStructure {

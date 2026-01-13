@@ -46,41 +46,65 @@ export function calculateElectricityCharge(
 ): CalculationResult {
   try {
     const bands: CalculationBand[] = [];
-    let remainingConsumption = consumption;
     let energyTotal = 0;
 
-    // Sort bands by minKwh
-    const sortedBands = [...pricing.energyCharges.bands].sort((a, b) => a.minKwh - b.minKwh);
+    // Check if flat-rate tariff (commercial) or banded (residential)
+    if (pricing.energyCharges.flatRate) {
+      // Commercial flat rate - rate is in cents × 100 (e.g., 391900 = R3.9190)
+      const ratePerKwh = pricing.energyCharges.flatRate;
+      const amount = Math.round(consumption * ratePerKwh / 100); // Divide by 100 to get cents
 
-    // Calculate band by band
-    for (const band of sortedBands) {
-      if (remainingConsumption <= 0) break;
+      bands.push({
+        range: 'All consumption',
+        usage: consumption,
+        rate: ratePerKwh / 100, // Convert to cents for display
+        amount: amount,
+        ruleSource: `Flat rate @ R${(ratePerKwh / 10000).toFixed(4)}/kWh`,
+      });
 
-      const bandMin = band.minKwh;
-      const bandMax = band.maxKwh ?? Infinity;
-      const bandWidth = bandMax - bandMin;
+      energyTotal = amount;
+    } else if (pricing.energyCharges.bands) {
+      // Residential banded pricing
+      let remainingConsumption = consumption;
 
-      // Adjust for billing period if specified
-      const periodDays = pricing.energyCharges.billingPeriodDays || 30;
-      const adjustedBandWidth = bandWidth * (billingDays / periodDays);
+      // Sort bands by minKwh
+      const sortedBands = [...pricing.energyCharges.bands].sort((a, b) => a.minKwh - b.minKwh);
 
-      const usageInBand = Math.min(remainingConsumption, adjustedBandWidth);
-      const bandAmount = Math.round(usageInBand * band.ratePerKwh);
+      // Calculate band by band
+      for (const band of sortedBands) {
+        if (remainingConsumption <= 0) break;
 
-      if (usageInBand > 0) {
-        bands.push({
-          range: band.maxKwh
-            ? `${band.minKwh} - ${band.maxKwh} kWh`
-            : `${band.minKwh}+ kWh`,
-          usage: Math.round(usageInBand * 100) / 100,
-          rate: band.ratePerKwh,
-          amount: bandAmount,
-          ruleSource: `${band.description} @ ${(band.ratePerKwh / 100).toFixed(2)} c/kWh`,
-        });
+        const bandMin = band.minKwh;
+        const bandMax = band.maxKwh ?? Infinity;
+        const bandWidth = bandMax - bandMin;
 
-        energyTotal += bandAmount;
-        remainingConsumption -= usageInBand;
+        // Adjust for billing period if specified
+        const periodDays = pricing.energyCharges.billingPeriodDays || 30;
+        const adjustedBandWidth = bandWidth * (billingDays / periodDays);
+
+        const usageInBand = Math.min(remainingConsumption, adjustedBandWidth);
+        const bandAmount = Math.round(usageInBand * band.ratePerKwh);
+
+        if (usageInBand > 0) {
+          bands.push({
+            range: band.maxKwh
+              ? `${band.minKwh} - ${band.maxKwh} kWh`
+              : `${band.minKwh}+ kWh`,
+            usage: Math.round(usageInBand * 100) / 100,
+            rate: band.ratePerKwh,
+            amount: bandAmount,
+            ruleSource: `${band.description} @ ${(band.ratePerKwh / 100).toFixed(2)} c/kWh`,
+          });
+
+          energyTotal += bandAmount;
+          remainingConsumption -= usageInBand;
+        }
       }
+    } else {
+      return {
+        success: false,
+        error: 'Unknown pricing structure: neither flat rate nor banded',
+      };
     }
 
     // Add fixed charges
