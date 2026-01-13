@@ -43,3 +43,5 @@ prisma/*.db-journal
 
 # Testing
 coverage/
+.vercel
+.env*.local
