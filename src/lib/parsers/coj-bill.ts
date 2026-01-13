@@ -141,17 +141,29 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
     const energyTotalMatch = elecText.match(/Step\s*\d+[\s\S]*?@\s*R\s*[\d.]+[\s\S]*?([\d,]+\.\d{2})\s*\n/);
     const energyChargeTotal = energyTotalMatch ? parseFloat(energyTotalMatch[1].replace(/,/g, '')) : 0;
 
-    // Extract service charge
-    const serviceMatch = elecText.match(/Service\s+charge[^)]*\)[:\s]*([\d,]+\.\d+)/i);
-    const serviceCharge = serviceMatch ? parseFloat(serviceMatch[1].replace(/,/g, '')) : 0;
+    // Extract ALL service charges (multiple meters = multiple service charges)
+    let serviceCharge = 0;
+    const servicePattern = /Service\s+charge[^)]*\)[:\s]*([\d,]+\.\d+)/gi;
+    let serviceMatch;
+    while ((serviceMatch = servicePattern.exec(elecText)) !== null) {
+      serviceCharge += parseFloat(serviceMatch[1].replace(/,/g, ''));
+    }
 
-    // Extract network charge
-    const networkMatch = elecText.match(/Network\s+charge[^)]*\)[:\s]*([\d,]+\.\d+)/i);
-    const networkCharge = networkMatch ? parseFloat(networkMatch[1].replace(/,/g, '')) : 0;
+    // Extract ALL network charges
+    let networkCharge = 0;
+    const networkPattern = /Network\s+charge[^)]*\)[:\s]*([\d,]+\.\d+)/gi;
+    let networkMatch;
+    while ((networkMatch = networkPattern.exec(elecText)) !== null) {
+      networkCharge += parseFloat(networkMatch[1].replace(/,/g, ''));
+    }
 
-    // Extract network surcharge
+    // Extract network surcharge (kWh based)
     const surchargeMatch = elecText.match(/Network\s+Surcharge[^:]*[:\s]*([\d,]+\.\d+)/i);
     const networkSurcharge = surchargeMatch ? parseFloat(surchargeMatch[1].replace(/,/g, '')) : 0;
+
+    // Extract demand side management levy
+    const demandMatch = elecText.match(/Demand\s+side\s+management\s+levy[:\s]*([\d,]+\.\d+)/i);
+    const demandLevy = demandMatch ? parseFloat(demandMatch[1].replace(/,/g, '')) : 0;
 
     // Extract total electricity (with VAT) - format can be:
     // "VAT: 15.00% 17,603.93 134,963.47" (with spaces) or
@@ -201,6 +213,7 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
           energyChargeTotal,
           serviceCharge,
           networkCharge: networkCharge + networkSurcharge,
+          demandLevy,
           vatAmount,
           chargeDetails,
         },
@@ -502,11 +515,34 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
   if (sundrySection) {
     const sundryText = sundrySection[0];
 
-    // Extract surcharge on business services
-    const surchargeMatch = sundryText.match(/Surcharge\s+on\s+business\s+services[^:]*[:\s]*([\d,]+\.\d+)/i);
-    const sundryTotalMatch = sundryText.match(/VAT[:\s]*[\d.]+%[:\s]*([\d,]+\.\d+)[:\s]*([\d,]+\.\d+)/);
+    // Extract surcharge on business services base amount
+    const surchargeMatch = sundryText.match(/Surcharge\s+on\s+business\s+services[^:\d]*([\d,]+\.\d+)/i);
+    const baseAmount = surchargeMatch ? parseFloat(surchargeMatch[1].replace(/,/g, '')) : 0;
 
-    const sundryTotal = sundryTotalMatch ? parseFloat(sundryTotalMatch[2].replace(/,/g, '')) : 0;
+    // Try to extract total (VAT line: "VAT: 15.00% [vat_amount] [total]")
+    // Handle multiple formats:
+    // 1. "VAT: 15.00% 203.31 1,558.70" (space separated)
+    // 2. "VAT: 15.00%203.311,558.70" (no spaces - numbers run together)
+    let sundryTotal = 0;
+    let vatAmount = 0;
+
+    // Try space-separated format first
+    const spacedMatch = sundryText.match(/VAT[:\s]*[\d.]+%\s*([\d,]+\.\d{2})\s+([\d,]+\.\d{2})/);
+    if (spacedMatch) {
+      vatAmount = parseFloat(spacedMatch[1].replace(/,/g, ''));
+      sundryTotal = parseFloat(spacedMatch[2].replace(/,/g, ''));
+    } else {
+      // Try non-spaced format
+      const nonSpacedMatch = sundryText.match(/VAT[:\s]*[\d.]+%\s*([\d,]+\.\d{2})([\d,]+\.\d{2})/);
+      if (nonSpacedMatch) {
+        vatAmount = parseFloat(nonSpacedMatch[1].replace(/,/g, ''));
+        sundryTotal = parseFloat(nonSpacedMatch[2].replace(/,/g, ''));
+      } else if (baseAmount > 0) {
+        // Calculate from base if we have it
+        vatAmount = baseAmount * 0.15;
+        sundryTotal = baseAmount + vatAmount;
+      }
+    }
 
     if (sundryTotal > 0) {
       items.push({
@@ -518,7 +554,8 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
         tariffCode: null,
         isEstimated: false,
         metadata: {
-          baseAmount: surchargeMatch ? parseFloat(surchargeMatch[1].replace(/,/g, '')) : null,
+          baseAmount,
+          vatAmount,
         },
       });
     }

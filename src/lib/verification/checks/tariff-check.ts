@@ -158,7 +158,8 @@ export async function runTariffChecks(
  *
  * RULES:
  * - Detect customer category BEFORE applying any heuristics
- * - For non-residential: DO NOT apply residential consumption comparisons
+ * - For MULTI-METER commercial properties: Verify ARITHMETIC using bill rates
+ * - For single-meter: Try standard tariff, fall back to arithmetic verification
  * - If commercial tariffs missing: CANNOT_VERIFY (never estimate)
  * - Must cite source document when claiming overcharge
  */
@@ -169,9 +170,29 @@ async function checkElectricityTariff(
 ): Promise<Finding> {
   const consumption = item.quantity!;
   const actual = item.amount;
-  const billDate = bill.billDate ? new Date(bill.billDate) : undefined;
   const isCommercial = COMMERCIAL_CATEGORIES.includes(customerCategory);
 
+  // Check if this bill has detailed charge breakdown (multi-meter or specific rates)
+  const metadata = item.metadata as {
+    meters?: Array<{consumption: number; type: string}>;
+    charges?: Array<{step: number; kWh: number; rate: number}>;
+    energyChargeTotal?: number;
+    serviceCharge?: number;
+    networkCharge?: number;
+    vatAmount?: number;
+  } | undefined;
+
+  const hasMultipleMeters = metadata?.meters && metadata.meters.length > 1;
+  const hasBillRates = metadata?.charges && metadata.charges.length > 0;
+
+  // For multi-meter properties or properties with specific bill rates:
+  // Verify ARITHMETIC using the rates shown on the bill, not standard tariffs
+  if (hasMultipleMeters || (hasBillRates && isCommercial)) {
+    return verifyElectricityArithmetic(item, metadata!, isCommercial);
+  }
+
+  // Standard tariff verification for single-meter properties
+  const billDate = bill.billDate ? new Date(bill.billDate) : undefined;
   const result = await calculateElectricity(
     consumption,
     customerCategory,
@@ -181,6 +202,11 @@ async function checkElectricityTariff(
 
   // No tariff found - CRITICAL: Different messages for commercial vs residential
   if (result.cannotVerify || !result.success) {
+    // If we have bill rates, fall back to arithmetic verification
+    if (hasBillRates && metadata) {
+      return verifyElectricityArithmetic(item, metadata, isCommercial);
+    }
+
     const categoryLabel = isCommercial
       ? customerCategory.charAt(0).toUpperCase() + customerCategory.slice(1)
       : 'Residential';
@@ -264,6 +290,102 @@ async function checkElectricityTariff(
     impactMin,
     impactMax,
     citation: buildCitation(result.rule, result.breakdown),
+  };
+}
+
+/**
+ * Verify electricity arithmetic using rates shown on the bill
+ * For multi-meter properties with specific/negotiated rates
+ */
+function verifyElectricityArithmetic(
+  item: ParsedLineItem,
+  metadata: {
+    meters?: Array<{consumption: number; type: string}>;
+    charges?: Array<{step: number; kWh: number; rate: number}>;
+    energyChargeTotal?: number;
+    serviceCharge?: number;
+    networkCharge?: number;
+    demandLevy?: number;
+    vatAmount?: number;
+  },
+  isCommercial: boolean
+): Finding {
+  const actual = item.amount;
+  const charges = metadata.charges || [];
+  const meterCount = metadata.meters?.length || 1;
+
+  // Calculate expected energy charges from bill rates
+  let expectedEnergy = 0;
+  const breakdownLines: string[] = [];
+
+  for (const charge of charges) {
+    const chargeAmount = charge.kWh * charge.rate;
+    expectedEnergy += chargeAmount;
+    breakdownLines.push(`• ${charge.kWh.toLocaleString()} kWh × R${charge.rate.toFixed(4)} = R${chargeAmount.toFixed(2)}`);
+  }
+
+  // Add fixed charges
+  const serviceCharge = metadata.serviceCharge || 0;
+  const networkCharge = metadata.networkCharge || 0;
+  const demandLevy = metadata.demandLevy || 0;
+  const fixedTotal = serviceCharge + networkCharge + demandLevy;
+
+  if (serviceCharge > 0) {
+    breakdownLines.push(`• Service charges: R${serviceCharge.toFixed(2)}`);
+  }
+  if (networkCharge > 0) {
+    breakdownLines.push(`• Network charges: R${networkCharge.toFixed(2)}`);
+  }
+  if (demandLevy > 0) {
+    breakdownLines.push(`• Demand levy: R${demandLevy.toFixed(2)}`);
+  }
+
+  const subtotal = expectedEnergy + fixedTotal;
+  const expectedVat = subtotal * 0.15;
+  const expectedTotal = subtotal + expectedVat;
+
+  breakdownLines.push(`\n**Subtotal:** R${subtotal.toFixed(2)}`);
+  breakdownLines.push(`**VAT (15%):** R${expectedVat.toFixed(2)}`);
+  breakdownLines.push(`**Expected Total:** R${expectedTotal.toFixed(2)}`);
+
+  const difference = actual - Math.round(expectedTotal * 100);
+  const toleranceCents = 500; // R5 tolerance for arithmetic
+
+  if (Math.abs(difference) <= toleranceCents) {
+    return {
+      checkType: 'tariff',
+      checkName: 'electricity_arithmetic_verified',
+      status: 'VERIFIED',
+      confidence: 90,
+      title: `Electricity charges verified (${meterCount} meter${meterCount > 1 ? 's' : ''})`,
+      explanation: `Your electricity charge of R${(actual / 100).toFixed(2)} has been verified against the rates shown on your bill.\n\n` +
+        `**Calculation using bill rates:**\n${breakdownLines.join('\n')}\n\n` +
+        `_Note: This property uses ${isCommercial ? 'commercial/bulk' : 'specific'} rates that may differ from standard tariffs._`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Arithmetic verified using rates shown on bill. Standard tariff comparison not applicable for multi-meter/bulk properties.',
+      },
+    };
+  }
+
+  // Arithmetic doesn't match - this IS a problem
+  return {
+    checkType: 'tariff',
+    checkName: 'electricity_arithmetic_error',
+    status: 'LIKELY_WRONG',
+    confidence: 85,
+    title: 'Electricity arithmetic discrepancy',
+    explanation: `The electricity charges on your bill do not add up correctly based on the rates shown.\n\n` +
+      `**Calculation using bill rates:**\n${breakdownLines.join('\n')}\n\n` +
+      `**Billed:** R${(actual / 100).toFixed(2)}\n` +
+      `**Calculated:** R${expectedTotal.toFixed(2)}\n` +
+      `**Discrepancy:** R${(Math.abs(difference) / 100).toFixed(2)}`,
+    impactMin: Math.abs(difference),
+    impactMax: Math.abs(difference),
+    citation: {
+      hasSource: false,
+      noSourceReason: 'Arithmetic error detected using rates shown on the bill itself.',
+    },
   };
 }
 
