@@ -2,10 +2,11 @@
  * Tariff Verification Checks for MUNIPAL
  *
  * Uses the knowledge system to verify charges against official tariffs.
- * Every finding includes:
- * - Source citation (KnowledgeDocument + TariffRule)
- * - Calculation breakdown
- * - Confidence level based on rule verification status
+ *
+ * CORE PRINCIPLE: NO accusations without explicit tariff citations.
+ * - If tariff not available: return CANNOT_VERIFY, never estimate
+ * - If category unknown: return CANNOT_VERIFY, never assume
+ * - Every finding MUST cite source document and page when accusing
  */
 
 import { ParsedBill, ParsedLineItem, PropertyInfo } from '../../parsers/types';
@@ -20,6 +21,12 @@ import {
   inferCustomerCategory,
 } from '../../knowledge/tariffs';
 import type { RuleMatchResult, CalculationBreakdown } from '../../knowledge/types';
+
+// Customer categories that require specific commercial tariffs
+const COMMERCIAL_CATEGORIES = ['commercial', 'business', 'industrial'];
+
+// Rounding tolerance in cents (R1.00)
+const ROUNDING_TOLERANCE_CENTS = 100;
 
 /**
  * Build citation from rule match result
@@ -148,6 +155,12 @@ export async function runTariffChecks(
 
 /**
  * Check electricity charges against official tariffs
+ *
+ * RULES:
+ * - Detect customer category BEFORE applying any heuristics
+ * - For non-residential: DO NOT apply residential consumption comparisons
+ * - If commercial tariffs missing: CANNOT_VERIFY (never estimate)
+ * - Must cite source document when claiming overcharge
  */
 async function checkElectricityTariff(
   item: ParsedLineItem,
@@ -157,6 +170,7 @@ async function checkElectricityTariff(
   const consumption = item.quantity!;
   const actual = item.amount;
   const billDate = bill.billDate ? new Date(bill.billDate) : undefined;
+  const isCommercial = COMMERCIAL_CATEGORIES.includes(customerCategory);
 
   const result = await calculateElectricity(
     consumption,
@@ -165,17 +179,30 @@ async function checkElectricityTariff(
     bill.billingDays
   );
 
-  // No tariff found
+  // No tariff found - CRITICAL: Different messages for commercial vs residential
   if (result.cannotVerify || !result.success) {
+    const categoryLabel = isCommercial
+      ? customerCategory.charAt(0).toUpperCase() + customerCategory.slice(1)
+      : 'Residential';
+
     return {
       checkType: 'tariff',
       checkName: 'electricity_cannot_verify',
       status: 'CANNOT_VERIFY',
       confidence: 0,
-      title: 'Electricity charges cannot be verified',
-      explanation: result.cannotVerifyReason ||
-        'We could not locate the applicable City Power tariff schedule for your billing period.',
-      citation: buildCitation(result.rule, result.breakdown),
+      title: `Electricity tariff verification unavailable`,
+      explanation: isCommercial
+        ? `**${categoryLabel} electricity tariffs** for this financial year are not yet available in the knowledge base. ` +
+          `Your electricity charge of R${(actual / 100).toFixed(2)} for ${consumption.toLocaleString()} kWh cannot be verified against official rates until the City Power commercial tariff schedule is loaded.\n\n` +
+          `_Note: Commercial tariffs differ significantly from residential rates and cannot be compared._`
+        : `We could not locate the applicable City Power tariff schedule for ${categoryLabel.toLowerCase()} customers. ` +
+          `Your electricity charge of R${(actual / 100).toFixed(2)} for ${consumption.toLocaleString()} kWh cannot be verified at this time.`,
+      citation: {
+        hasSource: false,
+        noSourceReason: isCommercial
+          ? `Commercial/Business electricity tariffs for FY${result.breakdown?.financialYear || 'current'} not yet in knowledge base.`
+          : result.cannotVerifyReason || 'Tariff schedule not found.',
+      },
     };
   }
 
@@ -186,32 +213,54 @@ async function checkElectricityTariff(
   // Determine confidence based on rule verification
   const baseConfidence = result.rule?.isVerified ? 92 : 70;
 
-  // Within R10 tolerance
-  if (Math.abs(difference) < 1000) {
+  // Within tolerance - VERIFIED
+  // Use R10 tolerance for residential, R50 for commercial (larger bills)
+  const toleranceCents = isCommercial ? 5000 : 1000;
+  if (Math.abs(difference) < toleranceCents) {
     return {
       checkType: 'tariff',
       checkName: 'electricity_tariff_verified',
       status: 'VERIFIED',
       confidence: baseConfidence,
       title: 'Electricity charges verified',
-      explanation: `Your electricity charge of R${(actual / 100).toFixed(2)} for ${consumption} kWh matches the current City Power tariff.${breakdownText}`,
+      explanation: `Your electricity charge of R${(actual / 100).toFixed(2)} for ${consumption.toLocaleString()} kWh matches the ${customerCategory} City Power tariff.${breakdownText}`,
       citation: buildCitation(result.rule, result.breakdown),
     };
   }
 
-  // Overcharge
+  // Discrepancy detected - MUST have citation to accuse
+  if (!result.rule?.knowledgeDocumentId) {
+    // No source document - cannot make accusation
+    return {
+      checkType: 'tariff',
+      checkName: 'electricity_unverified',
+      status: 'CANNOT_VERIFY',
+      confidence: 50,
+      title: 'Electricity charge requires manual verification',
+      explanation: `Your electricity charge of R${(actual / 100).toFixed(2)} differs from our calculated amount of R${(expected / 100).toFixed(2)}, but we cannot confirm this without a verified tariff source.\n\n` +
+        `_Pending official tariff document verification._`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Tariff calculation not yet backed by verified source document.',
+      },
+    };
+  }
+
+  // We have a verified source - can report discrepancy
   const impactMin = Math.round(Math.abs(difference) * 0.85);
   const impactMax = Math.abs(difference);
 
   return {
     checkType: 'tariff',
-    checkName: 'electricity_overcharge',
+    checkName: 'electricity_discrepancy',
     status: 'LIKELY_WRONG',
     confidence: baseConfidence - 7,
-    title: difference > 0 ? 'Electricity overcharge detected' : 'Electricity undercharge detected',
-    explanation: `You were charged R${(actual / 100).toFixed(2)} for ${consumption} kWh, but the correct charge should be R${(expected / 100).toFixed(2)} based on the official tariff.
+    title: difference > 0 ? 'Electricity charge discrepancy detected' : 'Electricity undercharge detected',
+    explanation: `Based on the official City Power ${customerCategory} tariff, your electricity charge should be R${(expected / 100).toFixed(2)} for ${consumption.toLocaleString()} kWh.
 
-**Difference: R${(Math.abs(difference) / 100).toFixed(2)}**${breakdownText}`,
+**Billed:** R${(actual / 100).toFixed(2)}
+**Expected:** R${(expected / 100).toFixed(2)}
+**Difference:** R${(Math.abs(difference) / 100).toFixed(2)}${breakdownText}`,
     impactMin,
     impactMax,
     citation: buildCitation(result.rule, result.breakdown),
@@ -220,6 +269,10 @@ async function checkElectricityTariff(
 
 /**
  * Check water charges against official tariffs
+ *
+ * RULES:
+ * - Must cite source when claiming discrepancy
+ * - Clearly distinguish consumption-based vs fixed levy charges
  */
 async function checkWaterTariff(
   item: ParsedLineItem,
@@ -229,6 +282,7 @@ async function checkWaterTariff(
   const consumption = item.quantity!;
   const actual = item.amount;
   const billDate = bill.billDate ? new Date(bill.billDate) : undefined;
+  const isCommercial = COMMERCIAL_CATEGORIES.includes(customerCategory);
 
   const result = await calculateWater(consumption, customerCategory, billDate);
 
@@ -238,10 +292,13 @@ async function checkWaterTariff(
       checkName: 'water_cannot_verify',
       status: 'CANNOT_VERIFY',
       confidence: 0,
-      title: 'Water charges cannot be verified',
-      explanation: result.cannotVerifyReason ||
-        'We could not locate the applicable Johannesburg Water tariff schedule for your billing period.',
-      citation: buildCitation(result.rule, result.breakdown),
+      title: 'Water tariff verification unavailable',
+      explanation: `Your water charge of R${(actual / 100).toFixed(2)} for ${consumption.toLocaleString()} kL cannot be verified. ` +
+        (result.cannotVerifyReason || 'The applicable Johannesburg Water tariff schedule is not yet in the knowledge base.'),
+      citation: {
+        hasSource: false,
+        noSourceReason: result.cannotVerifyReason || 'Tariff schedule not found.',
+      },
     };
   }
 
@@ -250,15 +307,33 @@ async function checkWaterTariff(
   const breakdownText = result.breakdown ? formatBreakdown(result.breakdown) : '';
   const baseConfidence = result.rule?.isVerified ? 90 : 68;
 
-  if (Math.abs(difference) < 500) {
+  // Tolerance: R5 residential, R20 commercial
+  const toleranceCents = isCommercial ? 2000 : 500;
+  if (Math.abs(difference) < toleranceCents) {
     return {
       checkType: 'tariff',
       checkName: 'water_tariff_verified',
       status: 'VERIFIED',
       confidence: baseConfidence,
       title: 'Water charges verified',
-      explanation: `Your water charge of R${(actual / 100).toFixed(2)} for ${consumption} kL matches the current Johannesburg Water tariff.${breakdownText}`,
+      explanation: `Your water charge of R${(actual / 100).toFixed(2)} for ${consumption.toLocaleString()} kL matches the Johannesburg Water tariff.${breakdownText}`,
       citation: buildCitation(result.rule, result.breakdown),
+    };
+  }
+
+  // Require source citation to accuse
+  if (!result.rule?.knowledgeDocumentId) {
+    return {
+      checkType: 'tariff',
+      checkName: 'water_unverified',
+      status: 'CANNOT_VERIFY',
+      confidence: 50,
+      title: 'Water charge requires manual verification',
+      explanation: `Your water charge of R${(actual / 100).toFixed(2)} differs from calculated R${(expected / 100).toFixed(2)}, but this cannot be confirmed without a verified tariff source.`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Awaiting verified source document.',
+      },
     };
   }
 
@@ -267,13 +342,15 @@ async function checkWaterTariff(
 
   return {
     checkType: 'tariff',
-    checkName: 'water_overcharge',
+    checkName: 'water_discrepancy',
     status: 'LIKELY_WRONG',
     confidence: baseConfidence - 8,
-    title: difference > 0 ? 'Water overcharge detected' : 'Water undercharge detected',
-    explanation: `You were charged R${(actual / 100).toFixed(2)} for ${consumption} kL, but the correct charge should be R${(expected / 100).toFixed(2)}.
+    title: difference > 0 ? 'Water charge discrepancy detected' : 'Water undercharge detected',
+    explanation: `Based on the official Johannesburg Water tariff, your water charge should be R${(expected / 100).toFixed(2)} for ${consumption.toLocaleString()} kL.
 
-**Difference: R${(Math.abs(difference) / 100).toFixed(2)}**${breakdownText}`,
+**Billed:** R${(actual / 100).toFixed(2)}
+**Expected:** R${(expected / 100).toFixed(2)}
+**Difference:** R${(Math.abs(difference) / 100).toFixed(2)}${breakdownText}`,
     impactMin,
     impactMax,
     citation: buildCitation(result.rule, result.breakdown),
@@ -282,6 +359,11 @@ async function checkWaterTariff(
 
 /**
  * Check sewerage charges against official tariffs
+ *
+ * RULES:
+ * - Clearly state when charges are FIXED PER-UNIT LEVIES (not consumption-based)
+ * - Multi-unit properties are billed per-unit, not on water consumption
+ * - Must cite source to accuse discrepancy
  */
 async function checkSewerageTariff(
   item: ParsedLineItem,
@@ -292,6 +374,7 @@ async function checkSewerageTariff(
   const actual = item.amount;
   const waterCharge = waterItem?.amount || 0;
   const waterChargeExclVat = Math.round(waterCharge / 1.15);
+  const isMultiUnit = units > 1;
 
   const result = await calculateSanitation(
     waterChargeExclVat,
@@ -299,61 +382,39 @@ async function checkSewerageTariff(
     customerCategory
   );
 
-  // If we can't calculate from knowledge base, fall back to heuristics
+  // Cannot verify - give clear explanation
   if (result.cannotVerify || !result.success) {
-    // Multi-unit heuristic
-    if (units > 1) {
+    // Multi-unit properties: explain fixed per-unit levy structure
+    if (isMultiUnit) {
       const perUnit = actual / 100 / units;
-      const minPerUnit = 300;
-      const maxPerUnit = 450;
-
-      if (perUnit >= minPerUnit && perUnit <= maxPerUnit) {
-        return {
-          checkType: 'tariff',
-          checkName: 'sewerage_multiunit',
-          status: 'VERIFIED',
-          confidence: 75,
-          title: 'Sewerage charges verified (multi-unit)',
-          explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} for ${units} units (R${perUnit.toFixed(2)}/unit) is within the typical CoJ multi-unit range.`,
-          citation: {
-            hasSource: false,
-            noSourceReason: result.cannotVerifyReason ||
-              'Multi-unit sewerage tariff not found. Using typical range verification.',
-          },
-        };
-      }
-
-      if (perUnit > maxPerUnit) {
-        return {
-          checkType: 'tariff',
-          checkName: 'sewerage_multiunit_high',
-          status: 'LIKELY_WRONG',
-          confidence: 70,
-          title: 'Sewerage charges appear high',
-          explanation: `Your sewerage charge of R${perUnit.toFixed(2)}/unit (${units} units = R${(actual / 100).toFixed(2)}) exceeds typical rates of R${minPerUnit}-${maxPerUnit}/unit.`,
-          impactMin: actual - (units * maxPerUnit * 100),
-          impactMax: actual - (units * minPerUnit * 100),
-          citation: {
-            hasSource: false,
-            noSourceReason: result.cannotVerifyReason ||
-              'Multi-unit sewerage tariff verification pending. Using typical range.',
-          },
-        };
-      }
+      return {
+        checkType: 'tariff',
+        checkName: 'sewerage_multiunit_noted',
+        status: 'CANNOT_VERIFY',
+        confidence: 60,
+        title: 'Sewerage charges noted (multi-unit property)',
+        explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} for ${units} units (R${perUnit.toFixed(2)}/unit) is a **fixed per-unit levy**.\n\n` +
+          `_Note: Multi-unit sewerage charges are billed as fixed amounts per unit, not based on water consumption. ` +
+          `Official tariff schedule required to verify exact per-unit rate._`,
+        citation: {
+          hasSource: false,
+          noSourceReason: result.cannotVerifyReason || 'Multi-unit sewerage tariff not yet in knowledge base.',
+        },
+      };
     }
 
-    // Standard residential fallback
+    // Single unit - awaiting tariff
     return {
       checkType: 'tariff',
       checkName: 'sewerage_cannot_verify',
       status: 'CANNOT_VERIFY',
       confidence: 50,
-      title: 'Sewerage charges require verification',
-      explanation: `Sewerage charge of R${(actual / 100).toFixed(2)} noted. ${result.cannotVerifyReason || 'Awaiting official tariff data for verification.'}`,
+      title: 'Sewerage tariff verification unavailable',
+      explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} cannot be verified. ` +
+        (result.cannotVerifyReason || 'The official sanitation tariff schedule is not yet in the knowledge base.'),
       citation: {
         hasSource: false,
-        noSourceReason: result.cannotVerifyReason ||
-          'Sewerage tariff not found in knowledge base.',
+        noSourceReason: result.cannotVerifyReason || 'Sanitation tariff not found.',
       },
     };
   }
@@ -363,27 +424,50 @@ async function checkSewerageTariff(
   const breakdownText = result.breakdown ? formatBreakdown(result.breakdown) : '';
   const baseConfidence = result.rule?.isVerified ? 85 : 70;
 
+  // Tolerance: R10
   if (Math.abs(difference) < 1000) {
+    const explanation = isMultiUnit
+      ? `Your sewerage charge of R${(actual / 100).toFixed(2)} for ${units} units matches the official per-unit levy rate.${breakdownText}`
+      : `Your sewerage charge of R${(actual / 100).toFixed(2)} matches the official sanitation tariff.${breakdownText}`;
+
     return {
       checkType: 'tariff',
       checkName: 'sewerage_tariff_verified',
       status: 'VERIFIED',
       confidence: baseConfidence,
-      title: 'Sewerage charges verified',
-      explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} matches the official tariff.${breakdownText}`,
+      title: isMultiUnit ? 'Sewerage per-unit levy verified' : 'Sewerage charges verified',
+      explanation,
       citation: buildCitation(result.rule, result.breakdown),
+    };
+  }
+
+  // Require source citation to accuse
+  if (!result.rule?.knowledgeDocumentId) {
+    return {
+      checkType: 'tariff',
+      checkName: 'sewerage_unverified',
+      status: 'CANNOT_VERIFY',
+      confidence: 50,
+      title: 'Sewerage charge requires manual verification',
+      explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} differs from calculated R${(expected / 100).toFixed(2)}, but this cannot be confirmed without a verified tariff source.`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Awaiting verified source document.',
+      },
     };
   }
 
   return {
     checkType: 'tariff',
-    checkName: 'sewerage_difference',
+    checkName: 'sewerage_discrepancy',
     status: 'LIKELY_WRONG',
     confidence: baseConfidence - 10,
     title: 'Sewerage charge discrepancy',
-    explanation: `Your sewerage charge of R${(actual / 100).toFixed(2)} differs from expected R${(expected / 100).toFixed(2)}.
+    explanation: `Based on the official sanitation tariff, your sewerage charge should be R${(expected / 100).toFixed(2)}.
 
-**Difference: R${(Math.abs(difference) / 100).toFixed(2)}**${breakdownText}`,
+**Billed:** R${(actual / 100).toFixed(2)}
+**Expected:** R${(expected / 100).toFixed(2)}
+**Difference:** R${(Math.abs(difference) / 100).toFixed(2)}${breakdownText}`,
     impactMin: Math.round(Math.abs(difference) * 0.85),
     impactMax: Math.abs(difference),
     citation: buildCitation(result.rule, result.breakdown),
@@ -489,6 +573,11 @@ async function checkRefuseTariff(
 
 /**
  * Check property rates against official tariffs
+ *
+ * RULES:
+ * - If R0.00, state "No rates charged this period" (NOT an error)
+ * - Must have property valuation to verify
+ * - Must cite source to accuse discrepancy
  */
 async function checkPropertyRates(
   item: ParsedLineItem,
@@ -497,6 +586,26 @@ async function checkPropertyRates(
 ): Promise<Finding> {
   const actual = item.amount;
 
+  // R0.00 rates - this is valid, not an error
+  if (actual === 0) {
+    return {
+      checkType: 'tariff',
+      checkName: 'rates_zero',
+      status: 'VERIFIED',
+      confidence: 95,
+      title: 'No property rates charged this period',
+      explanation: `No property rates (R0.00) have been charged on this bill. This may occur due to:\n` +
+        `• Rates rebate or exemption applied\n` +
+        `• Billing adjustment or credit\n` +
+        `• Rates billed separately\n\n` +
+        `_Property rates in South Africa are VAT-exempt._`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Zero-rated period - no tariff verification required.',
+      },
+    };
+  }
+
   if (!propertyValue || propertyValue <= 0) {
     return {
       checkType: 'tariff',
@@ -504,9 +613,8 @@ async function checkPropertyRates(
       status: 'CANNOT_VERIFY',
       confidence: 50,
       title: 'Property rates require valuation to verify',
-      explanation: `Your property rates of R${(actual / 100).toFixed(2)}/month cannot be fully verified without your property valuation.
-
-**Enter your property valuation** to verify the calculation. Find it on the CoJ e-Services portal or your rates notice.`,
+      explanation: `Your property rates of R${(actual / 100).toFixed(2)}/month cannot be verified without your municipal property valuation.\n\n` +
+        `_To verify: Enter your property valuation from the CoJ e-Services portal or rates clearance certificate._`,
       citation: {
         hasSource: false,
         noSourceReason: 'Property valuation required for rates calculation.',
@@ -523,13 +631,12 @@ async function checkPropertyRates(
       checkName: 'rates_cannot_verify',
       status: 'CANNOT_VERIFY',
       confidence: 40,
-      title: 'Property rates cannot be verified',
-      explanation: result.cannotVerifyReason ||
-        'We could not locate the applicable CoJ rates schedule.',
+      title: 'Property rates tariff unavailable',
+      explanation: `Your property rates of R${(actual / 100).toFixed(2)} cannot be verified. ` +
+        (result.cannotVerifyReason || 'The CoJ rates schedule is not yet in the knowledge base.'),
       citation: {
         hasSource: false,
-        noSourceReason: result.cannotVerifyReason ||
-          'CoJ rates tariff not found in knowledge base.',
+        noSourceReason: result.cannotVerifyReason || 'CoJ rates tariff not found.',
       },
     };
   }
@@ -539,6 +646,7 @@ async function checkPropertyRates(
   const breakdownText = result.breakdown ? formatBreakdown(result.breakdown) : '';
   const baseConfidence = result.rule?.isVerified ? 90 : 75;
 
+  // Tolerance: R50
   if (Math.abs(difference) < 5000) {
     return {
       checkType: 'tariff',
@@ -546,20 +654,41 @@ async function checkPropertyRates(
       status: 'VERIFIED',
       confidence: baseConfidence,
       title: 'Property rates verified',
-      explanation: `Your property rates of R${(actual / 100).toFixed(2)}/month are correct based on your property valuation of R${propertyValue.toLocaleString()}.${breakdownText}`,
+      explanation: `Your property rates of R${(actual / 100).toFixed(2)}/month are correct based on your property valuation of R${propertyValue.toLocaleString()}.\n\n` +
+        `_Note: Property rates are VAT-exempt in South Africa._${breakdownText}`,
       citation: buildCitation(result.rule, result.breakdown),
+    };
+  }
+
+  // Require source citation to accuse
+  if (!result.rule?.knowledgeDocumentId) {
+    return {
+      checkType: 'tariff',
+      checkName: 'rates_unverified',
+      status: 'CANNOT_VERIFY',
+      confidence: 50,
+      title: 'Property rates require manual verification',
+      explanation: `Your property rates of R${(actual / 100).toFixed(2)} differ from calculated R${(expected / 100).toFixed(2)}, but this cannot be confirmed without a verified tariff source.`,
+      citation: {
+        hasSource: false,
+        noSourceReason: 'Awaiting verified source document.',
+      },
     };
   }
 
   return {
     checkType: 'tariff',
-    checkName: 'rates_difference',
+    checkName: 'rates_discrepancy',
     status: 'LIKELY_WRONG',
     confidence: baseConfidence - 5,
-    title: difference > 0 ? 'Property rates too high' : 'Property rates lower than expected',
-    explanation: `Based on your property valuation of R${propertyValue.toLocaleString()}, you should be paying approximately R${(expected / 100).toFixed(2)}/month, but you're being charged R${(actual / 100).toFixed(2)}.
+    title: difference > 0 ? 'Property rates discrepancy detected' : 'Property rates lower than expected',
+    explanation: `Based on your property valuation of R${propertyValue.toLocaleString()}, your monthly rates should be approximately R${(expected / 100).toFixed(2)}.
 
-**Difference: R${(Math.abs(difference) / 100).toFixed(2)}**${breakdownText}`,
+**Billed:** R${(actual / 100).toFixed(2)}
+**Expected:** R${(expected / 100).toFixed(2)}
+**Difference:** R${(Math.abs(difference) / 100).toFixed(2)}
+
+_Note: Property rates are VAT-exempt._${breakdownText}`,
     impactMin: Math.round(Math.abs(difference) * 0.9),
     impactMax: Math.abs(difference),
     citation: buildCitation(result.rule, result.breakdown),
