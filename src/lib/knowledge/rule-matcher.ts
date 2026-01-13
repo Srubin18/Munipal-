@@ -13,6 +13,7 @@
 
 import { prisma } from '../db';
 import type { RuleMatchResult, RuleMatchCriteria, PricingStructure } from './types';
+import { getCurrentFinancialYear, getPreviousFinancialYear } from './financial-year';
 
 /**
  * Find matching tariff rule for given criteria
@@ -207,33 +208,8 @@ export async function findAllMatchingRules(
   }));
 }
 
-/**
- * Determine financial year from a date
- * CoJ financial year runs July 1 to June 30
- */
-export function getCurrentFinancialYear(date: Date = new Date()): string {
-  const month = date.getMonth() + 1;
-  const year = date.getFullYear();
-
-  if (month >= 7) {
-    // July onwards = current/next year
-    return `${year}/${(year + 1).toString().slice(2)}`;
-  } else {
-    // Before July = previous/current year
-    return `${year - 1}/${year.toString().slice(2)}`;
-  }
-}
-
-/**
- * Get previous financial year string
- */
-function getPreviousFinancialYear(fy: string): string {
-  const match = fy.match(/(\d{4})\/(\d{2})/);
-  if (!match) return '2024/25'; // Fallback
-
-  const startYear = parseInt(match[1]) - 1;
-  return `${startYear}/${(startYear + 1).toString().slice(2)}`;
-}
+// Financial year functions imported from './financial-year'
+// Single source of truth for CoJ fiscal calendar logic
 
 /**
  * Create alert for missing tariff (admin dashboard)

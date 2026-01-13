@@ -103,23 +103,19 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
     const elecText = electricitySection[0];
 
     // Extract consumption from meter readings
-    // Pattern: "Consumption: 996.930;" (before Units: kWh)
-    const consumptionMatches = elecText.match(/Consumption[:\s]*([\d,]+\.\d+)[;\s]/gi);
+    // Pattern: "Consumption: 19,616.000;" - specifically the meter consumption, NOT daily average
+    // The pattern requires a semicolon after to distinguish from "daily average consumption X.XXX kWh"
     const meters: Array<{consumption: number, type: string}> = [];
 
-    if (consumptionMatches) {
-      for (const match of consumptionMatches) {
-        const numMatch = match.match(/([\d,]+\.\d+)/);
-        if (numMatch) {
-          const consumption = parseFloat(numMatch[1].replace(/,/g, ''));
-          // Check if this is followed by "Type: Actual" or "Type: Estimated"
-          const typeMatch = elecText.match(new RegExp(`Consumption[:\\s]*${numMatch[1].replace('.', '\\.')}[\\s\\S]*?Type[:\\s]*(\\w+)`, 'i'));
-          meters.push({
-            consumption,
-            type: typeMatch ? typeMatch[1] : 'Actual',
-          });
-        }
-      }
+    // Match meter blocks: "Meter: XXXXX; ... Consumption: XXX.XXX; ... Type: Actual/Estimated"
+    // Use [\s\S]*? instead of .*? to match across newlines
+    const meterBlockPattern = /Meter[:\s]*(\d+)[;\s][\s\S]*?Consumption[:\s]*([\d,]+\.\d+)[;\s][\s\S]*?Type[:\s]*(\w+)/gi;
+    let meterBlockMatch;
+
+    while ((meterBlockMatch = meterBlockPattern.exec(elecText)) !== null) {
+      const consumption = parseFloat(meterBlockMatch[2].replace(/,/g, ''));
+      const type = meterBlockMatch[3];
+      meters.push({ consumption, type });
     }
 
     // Extract all electricity step charges with rates
@@ -158,7 +154,9 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
     }
 
     // Extract network surcharge (kWh based)
-    const surchargeMatch = elecText.match(/Network\s+Surcharge[^:]*[:\s]*([\d,]+\.\d+)/i);
+    // Pattern: "Network Surcharge kWh1,137.36" - no separator before amount
+    // Use [^:\d]*? (non-greedy, stops at digits) to match optional text like "kWh"
+    const surchargeMatch = elecText.match(/Network\s+Surcharge[^:\d]*?([\d,]+\.\d+)/i);
     const networkSurcharge = surchargeMatch ? parseFloat(surchargeMatch[1].replace(/,/g, '')) : 0;
 
     // Extract demand side management levy

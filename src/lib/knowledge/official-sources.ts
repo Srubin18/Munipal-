@@ -1,6 +1,9 @@
 // Canonical list of official City of Johannesburg tariff sources
 // These are the authoritative sources MUNIPAL uses for verification
 
+// Re-export financial year utility from single source of truth
+export { getCurrentFinancialYear } from './financial-year';
+
 export interface OfficialSource {
   provider: string;
   providerLabel: string;
@@ -172,19 +175,5 @@ export function getAllProviders(): string[] {
   return ['city_power', 'joburg_water', 'coj', 'pikitup'];
 }
 
-// Get current financial year based on date
-export function getCurrentFinancialYear(date: Date = new Date()): string {
-  const month = date.getMonth(); // 0-indexed
-  const year = date.getFullYear();
-
-  // CoJ financial year runs July to June
-  // If we're in July-December, we're in year/year+1
-  // If we're in January-June, we're in year-1/year
-  if (month >= 6) {
-    // July onwards
-    return `${year}/${(year + 1).toString().slice(-2)}`;
-  } else {
-    // January-June
-    return `${year - 1}/${year.toString().slice(-2)}`;
-  }
-}
+// Financial year function is re-exported from financial-year.ts at top of file
+// This maintains backward compatibility for imports from this module

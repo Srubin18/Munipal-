@@ -5,7 +5,8 @@
  * Wraps the rule matcher and calculator services.
  */
 
-import { findMatchingRule, getCurrentFinancialYear, inferCustomerCategory } from './rule-matcher';
+import { findMatchingRule, inferCustomerCategory } from './rule-matcher';
+import { getCurrentFinancialYear } from './financial-year';
 import {
   calculateElectricityCharge,
   calculateWaterCharge,
