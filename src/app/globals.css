@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 175 25% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 175 25% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 175 25% 10%;
+    /* Teal primary - intelligent, trustworthy, secure */
+    --primary: 174 72% 40%;
+    --primary-foreground: 0 0% 100%;
+    /* Light teal backgrounds */
+    --secondary: 174 35% 96%;
+    --secondary-foreground: 175 25% 15%;
+    --muted: 174 25% 95%;
+    --muted-foreground: 175 15% 40%;
+    /* Accent - slightly different teal */
+    --accent: 174 45% 92%;
+    --accent-foreground: 175 25% 15%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 174 20% 88%;
+    --input: 174 20% 88%;
+    --ring: 174 72% 40%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

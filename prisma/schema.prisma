@@ -1,0 +1,613 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserCategory {
+  RESIDENTIAL
+  COMMERCIAL
+  BUSINESS
+  DEVELOPER
+}
+
+enum CaseStatus {
+  ANALYZING
+  FINDINGS_READY
+  PENDING_PAYMENT
+  ACTIVE
+  AWAITING_COJ
+  RESOLVED
+  CLOSED
+}
+
+enum FindingStatus {
+  VERIFIED
+  LIKELY_WRONG
+  CANNOT_VERIFY
+}
+
+enum ActionType {
+  CASE_CREATED
+  DISPUTE_DRAFTED
+  DISPUTE_SUBMITTED
+  EMAIL_SENT
+  REFERENCE_OBTAINED
+  FOLLOWUP_SENT
+  RESPONSE_RECEIVED
+  CASE_RESOLVED
+}
+
+enum DocumentCategory {
+  TARIFF
+  CREDIT_CONTROL
+  METERING_POLICY
+  VALUATION_ROLL
+  BYLAW
+  REVENUE_POLICY
+  SERVICE_STANDARD
+}
+
+enum IngestionMethod {
+  PDF_UPLOAD
+  FIRECRAWL
+  MANUAL_ENTRY
+}
+
+enum ExtractionMethod {
+  AI_PARSED
+  PATTERN_MATCHED
+  MANUAL
+}
+
+// ============================================
+// AUTH
+// ============================================
+
+model User {
+  id            String       @id @default(cuid())
+  email         String       @unique
+  firstName     String
+  lastName      String
+  phone         String?
+  category      UserCategory
+  isAdmin       Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  properties    Property[]
+  cases         Case[]
+
+  @@index([email])
+}
+
+// ============================================
+// PROPERTY
+// ============================================
+
+model Property {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  accountNumber   String    @unique
+  streetAddress   String
+  suburb          String
+  postalCode      String?
+
+  valuationAmount     Int?
+  valuationRollYear   Int?
+  valuationStatus     String?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  bills           Bill[]
+  cases           Case[]
+
+  @@index([userId])
+  @@index([accountNumber])
+}
+
+// ============================================
+// BILL
+// ============================================
+
+model Bill {
+  id              String    @id @default(cuid())
+  propertyId      String
+  property        Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  fileName        String
+  fileUrl         String
+
+  billDate        DateTime?
+  dueDate         DateTime?
+  periodStart     DateTime?
+  periodEnd       DateTime?
+
+  totalDue        Int?
+  previousBalance Int?
+  currentCharges  Int?
+  vatAmount       Int?
+
+  parsedData      Json?
+  parseError      String?
+
+  createdAt       DateTime  @default(now())
+
+  lineItems       BillLineItem[]
+  cases           Case[]
+  analyses        BillAnalysis[]
+
+  @@index([propertyId])
+}
+
+model BillLineItem {
+  id            String   @id @default(cuid())
+  billId        String
+  bill          Bill     @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  serviceType   String
+  description   String
+  quantity      Float?
+  unitPrice     Int?
+  amount        Int
+  tariffCode    String?
+  isEstimated   Boolean  @default(false)
+  metadata      Json?
+
+  @@index([billId])
+}
+
+// ============================================
+// BILL ANALYSIS (standalone verification)
+// ============================================
+
+model BillAnalysis {
+  id              String    @id @default(cuid())
+
+  // Can be linked to a bill or standalone (test mode)
+  billId          String?
+  bill            Bill?     @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  // Parsed bill data (for standalone analysis)
+  accountNumber   String?
+  billDate        DateTime?
+  totalDue        Int?
+  parsedData      Json?
+
+  // Summary
+  summary         String?
+  recommendation  String?   // "do_nothing" | "handle_yourself" | "let_munipal_handle"
+
+  // Aggregated impact
+  totalImpactMin  Int       @default(0)
+  totalImpactMax  Int       @default(0)
+
+  // Stats
+  verifiedCount   Int       @default(0)
+  issueCount      Int       @default(0)
+  unknownCount    Int       @default(0)
+
+  createdAt       DateTime  @default(now())
+
+  findings        AnalysisFinding[]
+
+  @@index([billId])
+  @@index([createdAt])
+}
+
+// ============================================
+// ANALYSIS FINDING (with full citation)
+// ============================================
+
+model AnalysisFinding {
+  id                    String         @id @default(cuid())
+  analysisId            String
+  analysis              BillAnalysis   @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  // What was checked
+  checkType             String         // "tariff", "meter", "arithmetic"
+  checkName             String         // specific check identifier
+  serviceType           String         // "electricity", "water", etc.
+  lineItemDescription   String?
+
+  // Result
+  status                FindingStatus
+  confidence            Int            // 0-100
+
+  // Amounts (all in cents)
+  chargedAmount         Int?
+  expectedAmount        Int?
+  differenceAmount      Int?
+
+  // CALCULATION TRANSPARENCY (critical for trust)
+  // JSON structure: { consumption, bands[], fixedCharges[], subtotal, vat, total }
+  calculationBreakdown  Json?
+
+  // SOURCE CITATION (non-negotiable)
+  tariffRuleId          String?
+  tariffRule            TariffRule?    @relation(fields: [tariffRuleId], references: [id])
+  knowledgeDocumentId   String?
+  knowledgeDocument     KnowledgeDocument? @relation(fields: [knowledgeDocumentId], references: [id])
+  sourcePageNumber      Int?
+  sourceExcerpt         String?        @db.Text
+
+  // User-facing explanation
+  title                 String
+  explanation           String         @db.Text
+  recommendation        String?
+
+  createdAt             DateTime       @default(now())
+
+  @@index([analysisId])
+  @@index([status])
+  @@index([tariffRuleId])
+  @@index([knowledgeDocumentId])
+}
+
+// ============================================
+// CASE (dispute workflow)
+// ============================================
+
+model Case {
+  id              String     @id @default(cuid())
+  caseNumber      String     @unique
+
+  userId          String
+  user            User       @relation(fields: [userId], references: [id])
+  propertyId      String
+  property        Property   @relation(fields: [propertyId], references: [id])
+  billId          String
+  bill            Bill       @relation(fields: [billId], references: [id])
+
+  status          CaseStatus @default(ANALYZING)
+  summary         String?
+
+  estimatedImpactMin  Int?
+  estimatedImpactMax  Int?
+
+  pricePaid       Int?
+  paymentRef      String?
+  paidAt          DateTime?
+
+  cojReference    String?
+  cojDeadline     DateTime?
+
+  resolvedAt      DateTime?
+  resolutionNote  String?
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  findings        Finding[]
+  actions         CaseAction[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ============================================
+// CASE FINDING (legacy - links to case)
+// ============================================
+
+model Finding {
+  id              String        @id @default(cuid())
+  caseId          String
+  case            Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  checkType       String
+  checkName       String
+  status          FindingStatus
+  confidence      Int
+
+  title           String
+  explanation     String
+
+  impactMin       Int?
+  impactMax       Int?
+
+  // Citation
+  hasSource                 Boolean            @default(false)
+  knowledgeDocumentId       String?
+  knowledgeDocument         KnowledgeDocument? @relation(fields: [knowledgeDocumentId], references: [id])
+  tariffRuleId              String?
+  tariffRule                TariffRule?        @relation(fields: [tariffRuleId], references: [id])
+  sourcePageNumber          Int?
+  sourceExcerpt             String?            @db.Text
+  calculationBreakdown      Json?
+  noSourceReason            String?
+
+  createdAt       DateTime      @default(now())
+
+  @@index([caseId])
+  @@index([knowledgeDocumentId])
+  @@index([tariffRuleId])
+}
+
+// ============================================
+// CASE ACTIONS (timeline)
+// ============================================
+
+model CaseAction {
+  id              String     @id @default(cuid())
+  caseId          String
+  case            Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  type            ActionType
+  description     String
+
+  executedAt      DateTime   @default(now())
+
+  success         Boolean    @default(true)
+  details         String?
+  cojReference    String?
+
+  @@index([caseId, executedAt])
+}
+
+// ============================================
+// KNOWLEDGE DOCUMENT (Source of Truth)
+// ============================================
+
+model KnowledgeDocument {
+  id                String            @id @default(cuid())
+
+  // Source identification
+  provider          String            // "city_power", "joburg_water", "coj", "pikitup"
+  documentType      String            // "tariff_schedule", "by_law", "rates_policy"
+  category          DocumentCategory
+  financialYear     String            // "2025/26"
+
+  // Document details
+  title             String
+  description       String?
+
+  // Legal reference (for by-laws)
+  actName           String?
+  bylawName         String?
+  section           String?
+
+  // Source metadata
+  sourceUrl         String?
+  sourceFileName    String?
+  checksum          String            // SHA-256 of original document
+
+  // Content
+  rawText           String?           @db.Text
+  rawPdfBase64      String?           @db.Text  // Base64 encoded PDF for audit
+  pageCount         Int?
+
+  // Validity period
+  effectiveDate     DateTime
+  expiryDate        DateTime?
+
+  // Ingestion metadata
+  ingestionMethod   IngestionMethod
+  ingestedAt        DateTime          @default(now())
+  ingestedBy        String?           // admin user ID
+
+  // Verification status
+  isVerified        Boolean           @default(false)
+  verifiedAt        DateTime?
+  verifiedBy        String?
+  verificationNotes String?
+
+  isActive          Boolean           @default(true)
+
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  // Relations
+  chunks            KnowledgeChunk[]
+  tariffRules       TariffRule[]
+  findings          Finding[]
+  analysisFindings  AnalysisFinding[]
+
+  @@unique([provider, documentType, financialYear, checksum])
+  @@index([provider, documentType, financialYear])
+  @@index([isActive, isVerified])
+}
+
+// ============================================
+// KNOWLEDGE CHUNK (for RAG)
+// ============================================
+
+model KnowledgeChunk {
+  id              String              @id @default(cuid())
+  documentId      String
+  document        KnowledgeDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  content         String              @db.Text
+  chunkIndex      Int
+
+  section         String?
+  pageNumber      Int?
+  tableReference  String?             // e.g., "Table 4.2"
+
+  metadata        Json?
+
+  createdAt       DateTime            @default(now())
+
+  @@index([documentId])
+  @@index([pageNumber])
+}
+
+// ============================================
+// TARIFF RULE (Normalized, Machine-Readable)
+// ============================================
+
+model TariffRule {
+  id                    String              @id @default(cuid())
+  knowledgeDocumentId   String
+  knowledgeDocument     KnowledgeDocument   @relation(fields: [knowledgeDocumentId], references: [id])
+
+  // Classification
+  provider              String              // "city_power", "joburg_water", "coj", "pikitup"
+  serviceType           String              // "electricity", "water", "sanitation", "refuse", "rates"
+  tariffCode            String              // unique identifier within provider
+  customerCategory      String              // "residential", "commercial", "industrial", etc.
+  description           String
+
+  // Pricing structure (flexible JSON for different service types)
+  // Electricity: { energyCharges: { bands: [...] }, fixedCharges: [...], demandCharges }
+  // Water: { consumptionCharges: { bands: [...] }, fixedCharges: [...] }
+  // Rates: { rateInRand, rebates: [...], formula }
+  pricingStructure      Json
+
+  // VAT handling
+  vatRate               Decimal             @default(15)
+  vatInclusive          Boolean             @default(false)
+
+  // Validity
+  effectiveDate         DateTime
+  expiryDate            DateTime?
+  financialYear         String              // "2025/26"
+
+  // Provenance (where in document this came from)
+  sourcePageNumber      Int?
+  sourceExcerpt         String              @db.Text
+  sourceTableReference  String?             // e.g., "Table 4.2, Page 12"
+
+  // Extraction metadata
+  extractedAt           DateTime            @default(now())
+  extractionMethod      ExtractionMethod
+  extractionConfidence  Decimal?            // 0-100
+
+  // Verification
+  isVerified            Boolean             @default(false)
+  verifiedAt            DateTime?
+  verifiedBy            String?
+  verificationNotes     String?
+
+  isActive              Boolean             @default(true)
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  // Relations
+  findings              Finding[]
+  analysisFindings      AnalysisFinding[]
+
+  @@unique([provider, serviceType, tariffCode, financialYear])
+  @@index([provider, serviceType, customerCategory])
+  @@index([effectiveDate, expiryDate])
+  @@index([isActive, isVerified])
+}
+
+// ============================================
+// MISSING TARIFF ALERT (for admin dashboard)
+// ============================================
+
+model MissingTariffAlert {
+  id                    String    @id @default(cuid())
+
+  provider              String
+  serviceType           String
+  financialYear         String
+
+  // Impact tracking
+  affectedAnalysisCount Int       @default(0)
+
+  // Suggested sources
+  suggestedUrls         Json?     // Array of URLs to try
+
+  // Status
+  priority              String    @default("high") // "critical", "high", "medium", "low"
+  status                String    @default("open") // "open", "in_progress", "resolved"
+
+  lastAttemptedAt       DateTime?
+  lastAttemptError      String?
+
+  resolvedAt            DateTime?
+  resolvedBy            String?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([provider, serviceType, financialYear])
+  @@index([status, priority])
+}
+
+// ============================================
+// INGESTION SYNC (Automatic document fetch tracking)
+// ============================================
+
+enum IngestionSyncStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+model IngestionSync {
+  id                    String              @id @default(cuid())
+
+  financialYear         String              // "2025/26"
+
+  // Overall status
+  status                IngestionSyncStatus @default(PENDING)
+  startedAt             DateTime?
+  completedAt           DateTime?
+
+  // Summary
+  providersAttempted    Int                 @default(0)
+  providersSucceeded    Int                 @default(0)
+  providersFailed       Int                 @default(0)
+  documentsIngested     Int                 @default(0)
+  rulesExtracted        Int                 @default(0)
+
+  // Triggered by
+  triggeredBy           String?             // "system", "admin", "api"
+
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  // Individual provider attempts
+  attempts              IngestionAttempt[]
+
+  @@index([financialYear, status])
+  @@index([createdAt])
+}
+
+model IngestionAttempt {
+  id                    String              @id @default(cuid())
+  syncId                String
+  sync                  IngestionSync       @relation(fields: [syncId], references: [id], onDelete: Cascade)
+
+  provider              String              // "city_power", "joburg_water", etc.
+
+  // Status
+  status                IngestionSyncStatus @default(PENDING)
+  startedAt             DateTime?
+  completedAt           DateTime?
+
+  // Source info
+  sourceUrl             String?
+  pdfUrl                String?
+
+  // Result
+  documentId            String?             // Created KnowledgeDocument ID
+  checksum              String?
+  pageCount             Int?
+  rulesExtracted        Int                 @default(0)
+
+  // Error tracking
+  errorMessage          String?
+  errorDetails          Json?
+
+  createdAt             DateTime            @default(now())
+
+  @@index([syncId])
+  @@index([provider, status])
+}
