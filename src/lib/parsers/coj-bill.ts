@@ -14,7 +14,8 @@ export async function parseCojBill(buffer: Buffer): Promise<ParsedBill> {
   const accountNumber = accountMatch ? accountMatch[1] : null;
 
   // Extract dates (format: 2025/12/04 or 2025/12/19)
-  const billDateMatch = text.match(/Date\s+(\d{4}\/\d{2}\/\d{2})/);
+  // Note: PDF extraction sometimes removes spaces, so use \s* (zero or more)
+  const billDateMatch = text.match(/Date\s*(\d{4}\/\d{2}\/\d{2})/);
   const dueDateMatch = text.match(/Due\s*Date[:\s]*(\d{4}\/\d{2}\/\d{2})/i);
 
   const billDate = billDateMatch ? parseCoJDate(billDateMatch[1]) : null;
@@ -231,7 +232,8 @@ function extractLineItems(text: string, propertyInfo: PropertyInfo): ParsedLineI
     const waterConsumption = waterConsMatch ? parseFloat(waterConsMatch[1].replace(/,/g, '')) : 0;
 
     // Extract water step charges
-    const waterStepPattern = /Step\s*(\d+)\s*([\d,]+\.\d+)\s*KL\s*@\s*R\s*([\d.]+)/gi;
+    // Rate pattern limited to reasonable decimal places (max R999.99)
+    const waterStepPattern = /Step\s*(\d+)\s*([\d,]+\.\d+)\s*KL\s*@\s*R\s*(\d{1,3}\.\d{2})/gi;
     const waterSteps: Array<{step: number, kl: number, rate: number}> = [];
     let stepMatch;
     while ((stepMatch = waterStepPattern.exec(waterText)) !== null) {
