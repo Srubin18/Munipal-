@@ -241,18 +241,29 @@ export default function TestPage() {
                   </div>
                 </div>
 
-                {/* Warning if no official sources */}
-                {(result.verification?.stats?.unknown > 0 || result.verification?.stats?.cannotVerify > 0) && (
-                  <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                {/* Warning if issues found */}
+                {(result.verification?.stats?.likelyWrong > 0) && (
+                  <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
                     <div className="flex items-start gap-2">
-                      <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5 flex-shrink-0" />
+                      <AlertTriangle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
                       <div className="text-sm">
-                        <p className="font-medium text-amber-800">Some charges could not be verified</p>
-                        <p className="text-amber-700 mt-1">
-                          Official tariff documents need to be uploaded to the knowledge base.
-                          <Link href="/admin/documents" className="underline ml-1">
-                            Upload documents
-                          </Link>
+                        <p className="font-medium text-red-800">Issues found that require attention</p>
+                        <p className="text-red-700 mt-1">
+                          Review the findings below and take the recommended actions.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* Info if items noted but not verified */}
+                {(result.verification?.stats?.noted > 0 && result.verification?.stats?.likelyWrong === 0) && (
+                  <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    <div className="flex items-start gap-2">
+                      <HelpCircle className="h-5 w-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                      <div className="text-sm">
+                        <p className="font-medium text-blue-800">Some charges noted but not arithmetically verified</p>
+                        <p className="text-blue-700 mt-1">
+                          Water and refuse charges are recorded. Electricity and rates were verified against FY 2025/26 tariffs.
                         </p>
                       </div>
                     </div>

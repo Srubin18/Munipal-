@@ -256,7 +256,23 @@ function checkMeterReadings(bill: ParsedBill): Finding[] {
 function checkPropertyClassification(bill: ParsedBill, propertyType: string, units: number): Finding[] {
   const findings: Finding[] = [];
 
+  // Check if this is a mixed-use property (both business and residential)
+  const ratesItem = bill.lineItems.find(i => i.serviceType === 'rates');
+  const ratesMeta = ratesItem?.metadata as {
+    propertyType?: string;
+    rateLines?: Array<{ value: number; rate: number; amount: number; category: string }>;
+  } | undefined;
+
+  const isMixedUse = ratesMeta?.propertyType?.includes('&') ||
+    (ratesMeta?.rateLines && ratesMeta.rateLines.filter(l => l.category !== 'rebate').length > 1);
+
+  // Don't suggest reclassification for mixed-use properties - they already have residential portions
+  if (isMixedUse) {
+    return findings;
+  }
+
   // Business rates on small property - might be wrong classification
+  // Only flag this for pure business properties with small footprint
   if (propertyType === 'Business' && units <= 2) {
     findings.push({
       severity: 'info',
@@ -306,7 +322,9 @@ function analyzeElectricity(bill: ParsedBill): ServiceAnalysis[] {
     const billed = item.amount / 100;
     const diff = Math.abs(billed - calculated);
 
-    status = diff < 20 ? 'verified' : 'issue';
+    // Allow up to R50 or 1% difference (whichever is greater) for rounding/timing
+    const tolerance = Math.max(50, billed * 0.01);
+    status = diff < tolerance ? 'verified' : 'issue';
     note = status === 'verified'
       ? `Verified: ${item.quantity?.toFixed(0)} kWh`
       : `Discrepancy: R${diff.toFixed(2)}`;
@@ -338,6 +356,66 @@ function analyzeRates(bill: ParsedBill, valuation: number, propertyType: string)
   const item = bill.lineItems.find(i => i.serviceType === 'rates');
   if (!item || valuation === 0) return [];
 
+  const billed = item.amount / 100;
+  const meta = item.metadata as {
+    propertyType?: string;
+    rateLines?: Array<{ value: number; rate: number; amount: number; category: string }>;
+    calculatedTotal?: number;
+  } | undefined;
+
+  // MIXED-USE PROPERTY: If bill has rate breakdown, verify against that
+  if (meta?.rateLines && meta.rateLines.length > 0) {
+    const isMixedUse = meta.propertyType?.includes('&') ||
+      meta.rateLines.filter(l => l.category !== 'rebate').length > 1;
+
+    // Sum up the rate lines to get expected total
+    let expectedTotal = 0;
+    const breakdown: string[] = [];
+
+    for (const line of meta.rateLines) {
+      expectedTotal += line.amount;
+      if (line.category === 'rebate') {
+        breakdown.push(`Rebate: -R${Math.abs(line.amount).toFixed(2)}`);
+      } else {
+        const rateType = line.rate > 0.02 ? 'Business' : 'Residential';
+        breakdown.push(`${rateType}: R${line.amount.toFixed(2)}`);
+      }
+    }
+
+    // Check for Section 15 MPRA adjustment (~R227) - applies to residential properties
+    const diffFromCalc = Math.abs(billed - expectedTotal);
+    const hasSection15 = hasSection15Adjustment(bill) ||
+      (!isMixedUse && propertyType === 'Residential' && diffFromCalc > 200 && diffFromCalc < 250);
+
+    if (hasSection15) {
+      expectedTotal += SA_MUNICIPAL_LAW.MPRA.section15.amount;
+    }
+
+    const diff = Math.abs(billed - expectedTotal);
+    const status = diff < 10 ? 'verified' : 'issue';
+
+    let note: string;
+    if (status === 'verified') {
+      if (isMixedUse) {
+        note = 'Mixed-use (Business + Residential)';
+      } else if (hasSection15) {
+        note = `${propertyType} rate + Sec.15 MPRA`;
+      } else {
+        note = `${propertyType} rate`;
+      }
+    } else {
+      note = `Expected: R${expectedTotal.toFixed(2)}`;
+    }
+
+    return [{
+      name: 'Rates',
+      billed,
+      status,
+      note,
+    }];
+  }
+
+  // SINGLE-USE PROPERTY: Calculate expected rate
   const isBusiness = propertyType === 'Business';
   const rate = isBusiness ? TARIFFS.rates.business : TARIFFS.rates.residential;
   const rebate = isBusiness ? 0 : TARIFFS.rates.rebateThreshold;
@@ -345,7 +423,6 @@ function analyzeRates(bill: ParsedBill, valuation: number, propertyType: string)
   const expectedMonthly = (assessable * rate) / 12;
 
   // Check for Section 15 MPRA adjustment (~R227)
-  const billed = item.amount / 100;
   const diffWithoutAdj = Math.abs(billed - expectedMonthly);
   const hasSection15 = hasSection15Adjustment(bill) || (diffWithoutAdj > 200 && diffWithoutAdj < 250);
   const section15Amount = hasSection15 ? SA_MUNICIPAL_LAW.MPRA.section15.amount : 0;
@@ -359,7 +436,7 @@ function analyzeRates(bill: ParsedBill, valuation: number, propertyType: string)
 
   return [{
     name: 'Rates',
-    billed: item.amount / 100,
+    billed,
     status,
     note,
   }];
