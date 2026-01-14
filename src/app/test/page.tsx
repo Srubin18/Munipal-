@@ -66,7 +66,11 @@ export default function TestPage() {
   };
 
   const formatCurrency = (cents: number) => {
-    return `R ${(cents / 100).toLocaleString('en-ZA', { minimumFractionDigits: 2 })}`;
+    return `R${(cents / 100).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const formatRands = (rands: number) => {
+    return `R${rands.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   };
 
   return (
@@ -519,6 +523,95 @@ export default function TestPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Action Plans - What to do next */}
+            {result.actionPlans && result.actionPlans.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <AlertTriangle className="h-5 w-5 text-amber-600" />
+                    Recommended Actions
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    {result.actionPlans.map((plan: any, idx: number) => (
+                      <div key={idx} className={`p-4 rounded-lg border-l-4 ${
+                        plan.priority === 'immediate' ? 'bg-red-50 border-red-500' :
+                        plan.priority === 'soon' ? 'bg-amber-50 border-amber-500' :
+                        'bg-blue-50 border-blue-500'
+                      }`}>
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="font-medium">{plan.title}</div>
+                            <div className="text-sm text-gray-600 capitalize mt-1">
+                              Priority: {plan.priority.replace('_', ' ')}
+                            </div>
+                          </div>
+                        </div>
+                        {plan.steps && plan.steps.length > 0 && (
+                          <ol className="mt-3 space-y-1 text-sm text-gray-700">
+                            {plan.steps.map((step: any, sIdx: number) => (
+                              <li key={sIdx} className="flex gap-2">
+                                <span className="text-gray-400">{step.order}.</span>
+                                <span>{step.action}{step.detail && <span className="text-gray-500"> - {step.detail}</span>}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        )}
+                        {plan.contacts && plan.contacts.length > 0 && (
+                          <div className="mt-3 text-xs text-gray-600 flex flex-wrap gap-3">
+                            {plan.contacts.map((c: any, cIdx: number) => (
+                              <span key={cIdx}>
+                                {c.name}: {c.phone}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Sources - CRITICAL: "without the sources we do not exist" */}
+            {result.sources && (
+              <Card className="border-2 border-blue-200 bg-blue-50/50">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-blue-900">
+                    <BookOpen className="h-5 w-5" />
+                    Verification Sources
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <div className="text-sm font-medium text-blue-800">Tariff Year</div>
+                    <div className="text-sm text-blue-700">{result.sources.tariffYear}</div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-blue-800">Legal Framework</div>
+                    <ul className="text-sm text-blue-700 list-disc list-inside">
+                      {result.sources.legalFramework?.map((law: string, idx: number) => (
+                        <li key={idx}>{law}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-blue-800">Official Contacts</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-blue-700 mt-1">
+                      {result.sources.contacts && Object.entries(result.sources.contacts).map(([key, contact]: [string, any]) => (
+                        <div key={key} className="flex flex-col">
+                          <span className="font-medium">{contact.name}</span>
+                          <span>{contact.phone}</span>
+                          <span className="text-xs">{contact.email}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Raw Data Toggle */}
             <details className="bg-white rounded-lg border p-4">
