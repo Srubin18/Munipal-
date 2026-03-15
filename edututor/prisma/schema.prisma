@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Curriculum {
+  CAPS
+  IEB
+}
+
+enum ContentType {
+  PAST_PAPER
+  QUIZ
+  EXPLANATION
+  WORKED_EXAMPLE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model Parent {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  phone     String?
+  authId    String   @unique @map("auth_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  students Student[]
+  bundles  HourBundle[]
+  payments Payment[]
+
+  @@map("parents")
+}
+
+model Student {
+  id         String     @id @default(cuid())
+  parentId   String     @map("parent_id")
+  name       String
+  grade      Int
+  curriculum Curriculum
+  authId     String?    @unique @map("auth_id")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  parent        Parent          @relation(fields: [parentId], references: [id])
+  subjects      StudentSubject[]
+  memory        StudentMemory?
+  memoryEntries MemoryEntry[]
+  sessions      Session[]
+  quizResults   QuizResult[]
+
+  @@map("students")
+}
+
+model StudentMemory {
+  id            String   @id @default(cuid())
+  studentId     String   @unique @map("student_id")
+  learningStyle String?  @map("learning_style")
+  pace          String?  @default("medium")
+  preferences   Json     @default("{}")
+  strengths     Json     @default("{}")
+  weaknesses    Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@map("student_memories")
+}
+
+model MemoryEntry {
+  id        String   @id @default(cuid())
+  studentId String   @map("student_id")
+  sessionId String?  @map("session_id")
+  key       String
+  value     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  student Student  @relation(fields: [studentId], references: [id])
+  session Session? @relation(fields: [sessionId], references: [id])
+
+  @@map("memory_entries")
+}
+
+model Subject {
+  id         String     @id @default(cuid())
+  name       String
+  grade      Int
+  curriculum Curriculum
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  topics   Topic[]
+  students StudentSubject[]
+
+  @@unique([name, grade, curriculum])
+  @@map("subjects")
+}
+
+model StudentSubject {
+  id        String @id @default(cuid())
+  studentId String @map("student_id")
+  subjectId String @map("subject_id")
+
+  student Student @relation(fields: [studentId], references: [id])
+  subject Subject @relation(fields: [subjectId], references: [id])
+
+  @@unique([studentId, subjectId])
+  @@map("student_subjects")
+}
+
+model Topic {
+  id        String   @id @default(cuid())
+  subjectId String   @map("subject_id")
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  subject  Subject   @relation(fields: [subjectId], references: [id])
+  contents Content[]
+
+  @@map("topics")
+}
+
+model Content {
+  id        String      @id @default(cuid())
+  topicId   String      @map("topic_id")
+  type      ContentType
+  title     String
+  body      Json        @default("{}")
+  fileUrl   String?     @map("file_url")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  topic       Topic        @relation(fields: [topicId], references: [id])
+  quizResults QuizResult[]
+
+  @@map("contents")
+}
+
+model Session {
+  id              String    @id @default(cuid())
+  studentId       String    @map("student_id")
+  subjectName     String?   @map("subject_name")
+  startedAt       DateTime  @default(now()) @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+  durationMinutes Int?      @map("duration_minutes")
+  topicsCovered   String[]  @map("topics_covered")
+  summary         String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  student       Student       @relation(fields: [studentId], references: [id])
+  memoryEntries MemoryEntry[]
+
+  @@map("sessions")
+}
+
+model HourBundle {
+  id         String   @id @default(cuid())
+  parentId   String   @map("parent_id")
+  hoursTotal Float    @map("hours_total")
+  hoursUsed  Float    @default(0) @map("hours_used")
+  purchasedAt DateTime @default(now()) @map("purchased_at")
+  expiresAt  DateTime? @map("expires_at")
+
+  parent  Parent   @relation(fields: [parentId], references: [id])
+  payment Payment?
+
+  @@map("hour_bundles")
+}
+
+model Payment {
+  id           String        @id @default(cuid())
+  parentId     String        @map("parent_id")
+  bundleId     String?       @unique @map("bundle_id")
+  amountCents  Int           @map("amount_cents")
+  paystackRef  String?       @unique @map("paystack_ref")
+  status       PaymentStatus @default(PENDING)
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  parent Parent      @relation(fields: [parentId], references: [id])
+  bundle HourBundle? @relation(fields: [bundleId], references: [id])
+
+  @@map("payments")
+}
+
+model QuizResult {
+  id          String   @id @default(cuid())
+  studentId   String   @map("student_id")
+  contentId   String   @map("content_id")
+  score       Float
+  totalMarks  Int      @map("total_marks")
+  answers     Json     @default("[]")
+  completedAt DateTime @default(now()) @map("completed_at")
+
+  student Student @relation(fields: [studentId], references: [id])
+  content Content @relation(fields: [contentId], references: [id])
+
+  @@map("quiz_results")
+}
