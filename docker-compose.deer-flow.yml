@@ -1,0 +1,42 @@
+version: '3.8'
+
+# DeerFlow - Autonomous Research & Code Agent
+# ByteDance's open-source SuperAgent for Munipal
+# Usage: docker compose -f docker-compose.deer-flow.yml up -d
+
+services:
+  deer-flow:
+    image: bytedance/deer-flow:latest
+    container_name: munipal-deer-flow
+    ports:
+      - "2026:2026"  # DeerFlow web UI
+      - "8024:8024"  # DeerFlow API gateway
+    volumes:
+      - ./data:/app/data          # Share bill PDFs with DeerFlow
+      - ./deer-flow-config:/app/config
+      - deer-flow-memory:/app/memory  # Persistent agent memory
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SEARCH_API_KEY=${SEARCH_API_KEY:-}
+      - DEER_FLOW_PORT=2026
+    restart: unless-stopped
+    networks:
+      - munipal-network
+
+  # Sandboxed code execution environment
+  deer-flow-sandbox:
+    image: bytedance/deer-flow-sandbox:latest
+    container_name: munipal-deer-flow-sandbox
+    privileged: false
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - munipal-network
+
+volumes:
+  deer-flow-memory:
+
+networks:
+  munipal-network:
+    driver: bridge
